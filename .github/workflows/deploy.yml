@@ -1,0 +1,64 @@
+name: Deploy to Cloud Run
+
+# Runs on every push to main. Builds the Docker image, pushes it to
+# Artifact Registry, and deploys it to the existing posiverse-engine
+# Cloud Run service (the Pub/Sub push-subscriber). Doesn't pass
+# --set-env-vars on the deploy step on purpose — `gcloud run deploy`
+# with just --image carries over the previous revision's env vars
+# (DB_*, INSTANCE_CONNECTION_NAME, INVENTORY_PUSH_SECRET) and Pub/Sub
+# push subscription wiring automatically, so this can't accidentally
+# wipe that configuration. Manual `gcloud run deploy` from a laptop
+# still works exactly as before — this doesn't replace that.
+#
+# One-time setup this workflow depends on (see DEPLOYMENT.md in
+# Posiverse_Claude_Project_Starter for the exact commands):
+#   - An Artifact Registry Docker repo
+#   - A dedicated deploy service account, scoped to just this service
+#   - A Workload Identity Federation pool/provider trusting this repo
+#   - These repo Settings > Secrets and variables > Actions entries:
+#       Variables: GCP_PROJECT_ID, GCP_REGION, AR_REPO, CLOUD_RUN_SERVICE
+#       Secrets:   WIF_PROVIDER, DEPLOY_SA_EMAIL
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write # required for Workload Identity Federation — no key file involved
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.DEPLOY_SA_EMAIL }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      - name: Build image
+        run: |
+          IMAGE="${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.AR_REPO }}/${{ vars.CLOUD_RUN_SERVICE }}:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Push image
+        run: docker push "$IMAGE"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${{ vars.CLOUD_RUN_SERVICE }}" \
+            --image "$IMAGE" \
+            --region "${{ vars.GCP_REGION }}" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --quiet
