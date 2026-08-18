@@ -160,7 +160,7 @@ module.exports.onPurchaseCreateUpdateInStock = async (req, res) => {
       if (delta === 0) continue; // untouched by this create/edit — nothing to apply
 
       const signedDelta = txnType.Direction === "out" ? -delta : delta;
-
+console.log("first")
       await client.query(
         `INSERT INTO "InStock"
           ("InStockID", "StoreID", "ProductID", "OpeningQty", "InStockQty",
