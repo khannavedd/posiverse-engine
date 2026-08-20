@@ -3,6 +3,7 @@ const bodyParser = require("body-parser");
 require("dotenv").config();
 
 const InventoryRoutes = require("./routes/Inventory/inventory");
+const SalesRoutes = require("./routes/Sales/sales");
 
 const app = express();
 const PORT = process.env.PORT || 8081;
@@ -15,6 +16,7 @@ app.use(bodyParser.json({ limit: "10mb" }));
 // itself is the "internal" boundary; the push-secret query param on
 // the Pub/Sub subscription is what actually guards it.
 app.use("/", InventoryRoutes);
+app.use("/", SalesRoutes);
 
 app.get("/health", (req, res) => res.status(200).send("ok"));
 
