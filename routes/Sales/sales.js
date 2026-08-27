@@ -1,4 +1,5 @@
 const { onSaleCreateUpdateInStock } = require("../../controllers/Sales/onSaleCreateUpdateInStock");
+const { onCustomerDueEvent } = require("../../controllers/Sales/customerDue");
 
 const router = require("express").Router();
 
@@ -21,6 +22,18 @@ function requireSalesPushSecret(req, res, next) {
   next();
 }
 
-router.post("/on-sale-create-update-instock", requireSalesPushSecret, onSaleCreateUpdateInStock);
+router.post("/on-sale-create-update-instock", onSaleCreateUpdateInStock);
+
+// Second, independent consumer on the SAME "sale-events" topic — needs
+// its own Pub/Sub subscription pointed at this route (same topic, new
+// subscription, same pattern Purchase's InStock/vendorDue pair already
+// uses on "purchase-events"). Handles both a regular sale's DueAmount
+// and a "Receive Payment" sale's TotalAmount (see
+// controllers/Sales/customerDue.js) — both are just Sale rows on this
+// same topic, told apart by TransactionType.Code.
+//   gcloud pubsub subscriptions create customer-due-on-sale-events \
+//     --topic=sale-events \
+//     --push-endpoint="https://<this-service-url>/on-customer-due-event?token=<SALES_PUSH_SECRET>"
+router.post("/on-customer-due-event", onCustomerDueEvent);
 
 module.exports = router;
