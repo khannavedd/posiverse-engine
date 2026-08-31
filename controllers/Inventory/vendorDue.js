@@ -1,5 +1,21 @@
 const pool = require("../../db/postgres");
 
+// Accepts BOTH the new InventoryCreated/InventoryUpdated spelling and
+// the old PurchaseCreated/PurchaseUpdated one (DEC-026). Being tolerant
+// here is what lets the two services deploy in any order: a message
+// published by the pre-rename API can still be in flight when this
+// deploys, and dropping it would silently lose a stock movement.
+// The old spelling can be removed once no pre-rename API is running.
+function isInventoryWrite(eventType) {
+  return eventType === "InventoryCreated" || eventType === "InventoryUpdated" ||
+         eventType === "PurchaseCreated" || eventType === "PurchaseUpdated";
+}
+
+// Same reason: the payload key moved from `purchase` to `inventory`.
+function documentFrom(data) {
+  return data?.inventory ?? data?.purchase ?? null;
+}
+
 const CONSUMER_NAME = "vendor-due-on-purchase-write";
 
 // Pub/Sub push endpoint target — see routes/Inventory/vendorDue.js.
@@ -40,7 +56,7 @@ module.exports.onPurchaseWriteUpdateVendorDue = async (req, res) => {
     return res.status(200).send();
   }
 
-  if (event.eventType !== "PurchaseCreated" && event.eventType !== "PurchaseUpdated") {
+  if (!isInventoryWrite(event.eventType)) {
     return res.status(200).send();
   }
 
@@ -71,7 +87,7 @@ module.exports.onPurchaseWriteUpdateVendorDue = async (req, res) => {
       throw dupeError;
     }
 
-    const after = event.afterData?.purchase;
+    const after = documentFrom(event.afterData);
     if (!after?.VendorID) {
       console.error(`onPurchaseWriteUpdateVendorDue: message ${messageId} has no usable purchase to apply — acking anyway`, event);
       await client.query("COMMIT");
@@ -91,8 +107,8 @@ module.exports.onPurchaseWriteUpdateVendorDue = async (req, res) => {
       // contributed, then apply what the NEW version contributes, to
       // whichever vendor owns it now (which may differ from before).
       // Ported straight from what used to be inline in
-      // Controllers/Purchase.js's updatePurchase.
-      const before = event.beforeData?.purchase;
+      // Controllers/Inventory.js's updateInventory.
+      const before = documentFrom(event.beforeData);
       const oldDue = Number(before?.DueAmount) || 0;
       const newDue = Number(after.DueAmount) || 0;
       const oldVendorId = before?.VendorID;

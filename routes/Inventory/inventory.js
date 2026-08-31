@@ -1,4 +1,4 @@
-const { onPurchaseCreateUpdateInStock } = require("../../controllers/Inventory/onPurchaseCreateUpdateInStock");
+const { onInventoryCreateUpdateInStock } = require("../../controllers/Inventory/onInventoryCreateUpdateInStock");
 const { onPurchaseWriteUpdateVendorDue } = require("../../controllers/Inventory/vendorDue");
 
 const router = require("express").Router();
@@ -19,7 +19,7 @@ function requireInventoryPushSecret(req, res, next) {
   next();
 }
 
-router.post("/on-inventory-create-update-instock" , onPurchaseCreateUpdateInStock);
+router.post("/on-inventory-create-update-instock" , onInventoryCreateUpdateInStock);
 router.post("/on-inventory-write-update-vendor-due", onPurchaseWriteUpdateVendorDue);
 
 module.exports = router;

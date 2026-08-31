@@ -1,6 +1,22 @@
 const crypto = require("crypto");
 const pool = require("../../db/postgres");
 
+// Accepts BOTH the new InventoryCreated/InventoryUpdated spelling and
+// the old PurchaseCreated/PurchaseUpdated one (DEC-026). Being tolerant
+// here is what lets the two services deploy in any order: a message
+// published by the pre-rename API can still be in flight when this
+// deploys, and dropping it would silently lose a stock movement.
+// The old spelling can be removed once no pre-rename API is running.
+function isInventoryWrite(eventType) {
+  return eventType === "InventoryCreated" || eventType === "InventoryUpdated" ||
+         eventType === "PurchaseCreated" || eventType === "PurchaseUpdated";
+}
+
+// Same reason: the payload key moved from `purchase` to `inventory`.
+function documentFrom(data) {
+  return data?.inventory ?? data?.purchase ?? null;
+}
+
 const CONSUMER_NAME = "instock-on-purchase-created";
 
 // Pub/Sub push endpoint target — see routes/Inventory/inventory.js.
@@ -30,12 +46,20 @@ const CONSUMER_NAME = "instock-on-purchase-created";
 // math later"), so this reads that row instead of assuming every event
 // on this topic adds stock. A type with UpdateStock = false (e.g. a
 // transaction that shouldn't touch inventory at all) is skipped
-// entirely; Direction 'in' adds the delta, 'out' subtracts it, and
-// 'neutral' has no stock effect.
+// entirely; Direction 'in' adds the delta and 'out' subtracts it.
+//
+// The third direction is 'adjustment' (renamed from 'neutral' by
+// migration 038, DEC-024): the line quantity is meant to carry its own
+// sign, so +5 adds and -3 subtracts on the same document. That is NOT
+// implemented — the guard below skips anything that isn't 'in' or
+// 'out', so an adjustment document records itself and moves no stock.
+// Implementing it means dropping the guard and letting signed
+// quantities through, which also needs an entry screen that can produce
+// them. Neither exists yet.
 //
 // No variant/anchor special-casing needed — InStock is keyed on
 // whatever ProductID a line item actually references, and
-// Controllers/Purchase.js already requires a real productId per item
+// Controllers/Inventory.js already requires a real productId per item
 // (the app's ProductPickerModal only ever lets a purchase line resolve
 // to an actual sellable row — a variant's own ProductID for a style
 // that has variants, or the anchor's own ProductID for a simple
@@ -48,7 +72,7 @@ const CONSUMER_NAME = "instock-on-purchase-created";
 // so one dedupe insert guards the entire item loop — a redelivery
 // hits the primary key before any item is touched, not partway
 // through.
-module.exports.onPurchaseCreateUpdateInStock = async (req, res) => {
+module.exports.onInventoryCreateUpdateInStock = async (req, res) => {
   const messageId = req.body?.message?.messageId;
   if (!messageId) {
     console.error("onPurchaseCreated: request has no message.messageId — acking without processing", req.body);
@@ -68,7 +92,7 @@ module.exports.onPurchaseCreateUpdateInStock = async (req, res) => {
     return res.status(200).send();
   }
 
-  if (event.eventType !== "PurchaseCreated" && event.eventType !== "PurchaseUpdated") {
+  if (!isInventoryWrite(event.eventType)) {
     return res.status(200).send();
   }
 
@@ -102,7 +126,8 @@ module.exports.onPurchaseCreateUpdateInStock = async (req, res) => {
       throw dupeError;
     }
 
-    const { purchase, items } = event.afterData || {};
+    const purchase = documentFrom(event.afterData);
+    const items = event.afterData?.items;
     const beforeItems = event.beforeData?.items || [];
     if (!purchase?.StoreID || !purchase?.TransactionTypeID || !Array.isArray(items)) {
       console.error(`onPurchaseCreated: message ${messageId} has no usable purchase/items to apply — acking anyway`, event);
@@ -111,7 +136,7 @@ module.exports.onPurchaseCreateUpdateInStock = async (req, res) => {
     }
 
     // TransactionTypeID never changes between a Purchase's create and
-    // any later edit (see Controllers/Purchase.js's updatePurchase
+    // any later edit (see Controllers/Inventory.js's updateInventory
     // comment), so one lookup covers both before- and after-items.
     const txnTypeResult = await client.query(
       `SELECT "Direction", "UpdateStock" FROM "TransactionType" WHERE "TransactionTypeID" = $1`,
@@ -128,10 +153,12 @@ module.exports.onPurchaseCreateUpdateInStock = async (req, res) => {
     }
 
     if (txnType.Direction !== "in" && txnType.Direction !== "out") {
-      // 'neutral' (or anything unrecognized) — this TransactionType is
-      // configured to leave stock alone even though UpdateStock is
-      // true (e.g. a Stock Adjustment/Transfer that nets to zero here
-      // and is handled by its own logic elsewhere, once that exists).
+      // 'adjustment' (or anything unrecognized). Signed per-line
+      // quantities aren't implemented, so an adjustment document is
+      // recorded but moves no stock — see this file's header comment.
+      // Note STOCK_ADJUSTMENT is seeded with UpdateStock = true, so it
+      // reaches this guard rather than the one above: the type says it
+      // wants to move stock, and this is where that intent is dropped.
       await client.query("COMMIT");
       return res.status(200).send();
     }

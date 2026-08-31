@@ -83,7 +83,43 @@ module.exports.onCustomerDueEvent = async (req, res) => {
       `SELECT "Code" FROM "TransactionType" WHERE "TransactionTypeID" = $1`,
       [after.TransactionTypeID]
     );
-    const isPaymentReceipt = txnTypeResult.rows[0]?.Code === "RECEIVE_PAYMENT";
+    const code = txnTypeResult.rows[0]?.Code;
+    const isPaymentReceipt = code === "RECEIVE_PAYMENT";
+
+    // A SALE_RETURN settled as "credit to account" carries no payment
+    // rows — the money moves on the customer's balance instead, which
+    // is this consumer's job. A return settled as a cash refund already
+    // handed the money back at the till and must NOT also reduce the
+    // balance, or the customer is credited twice.
+    //
+    // Told apart by PaymentMethod, which createSaleReturn sets to
+    // "Credit to account" for exactly this purpose. Reading the marker
+    // the writer set beats re-deriving it from the absence of payment
+    // rows, which would silently misclassify a refund whose payment
+    // insert failed.
+    const isCreditReturn = code === "SALE_RETURN" && after.PaymentMethod === "Credit to account";
+
+    if (isCreditReturn) {
+      const before = event.beforeData?.sale;
+      const oldEffective = before && before.Status !== "cancelled" ? Number(before.TotalAmount) || 0 : 0;
+      const newEffective = after.Status !== "cancelled" ? Number(after.TotalAmount) || 0 : 0;
+      const delta = newEffective - oldEffective;
+
+      // Reduces what's owed, exactly like a payment — returning goods
+      // you haven't paid for yet settles part of the debt. A customer
+      // who owed nothing ends up with a negative balance, which the app
+      // already renders as "In credit".
+      if (delta !== 0 && after.CustomerID) {
+        await client.query(
+          `UPDATE "Customer"
+           SET "OutstandingBalance" = "OutstandingBalance" - $1, "UpdatedAt" = now()
+           WHERE "CustomerID" = $2`,
+          [delta, after.CustomerID]
+        );
+      }
+      await client.query("COMMIT");
+      return res.status(200).send();
+    }
 
     if (isPaymentReceipt) {
       const before = event.beforeData?.sale;

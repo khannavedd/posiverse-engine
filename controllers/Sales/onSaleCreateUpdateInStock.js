@@ -6,7 +6,7 @@ const CONSUMER_NAME = "instock-on-sale-created";
 // Pub/Sub push endpoint target — see routes/Sales/sales.js. Subscribed
 // to its OWN "sale-events" topic (separate from Purchase's
 // "purchase-events" topic and this consumer's Purchase counterpart,
-// controllers/Inventory/onPurchaseCreateUpdateInStock.js) — explicit
+// controllers/Inventory/onInventoryCreateUpdateInStock.js) — explicit
 // decision to keep Sale's and Purchase's InStock pipelines fully
 // independent rather than branching one consumer on eventType.
 //
