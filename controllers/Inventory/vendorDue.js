@@ -89,7 +89,11 @@ module.exports.onPurchaseWriteUpdateVendorDue = async (req, res) => {
 
     const after = documentFrom(event.afterData);
     if (!after?.VendorID) {
-      console.error(`onPurchaseWriteUpdateVendorDue: message ${messageId} has no usable purchase to apply — acking anyway`, event);
+      // Not an error. A stock update legitimately has no vendor
+      // (migration 041 made VendorID nullable), so there is simply no
+      // balance to move. Logging this at error level made every normal
+      // stock correction look like a fault.
+      console.log(`onInventoryWriteUpdateVendorDue: message ${messageId} has no vendor — nothing to apply`);
       await client.query("COMMIT");
       return res.status(200).send();
     }

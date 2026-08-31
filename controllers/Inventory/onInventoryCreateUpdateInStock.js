@@ -139,7 +139,7 @@ module.exports.onInventoryCreateUpdateInStock = async (req, res) => {
     // any later edit (see Controllers/Inventory.js's updateInventory
     // comment), so one lookup covers both before- and after-items.
     const txnTypeResult = await client.query(
-      `SELECT "Direction", "UpdateStock" FROM "TransactionType" WHERE "TransactionTypeID" = $1`,
+      `SELECT "Direction", "UpdateStock", "Kind" FROM "TransactionType" WHERE "TransactionTypeID" = $1`,
       [purchase.TransactionTypeID]
     );
     const txnType = txnTypeResult.rows[0];
@@ -152,13 +152,23 @@ module.exports.onInventoryCreateUpdateInStock = async (req, res) => {
       return res.status(200).send();
     }
 
-    if (txnType.Direction !== "in" && txnType.Direction !== "out") {
-      // 'adjustment' (or anything unrecognized). Signed per-line
-      // quantities aren't implemented, so an adjustment document is
-      // recorded but moves no stock — see this file's header comment.
-      // Note STOCK_ADJUSTMENT is seeded with UpdateStock = true, so it
-      // reaches this guard rather than the one above: the type says it
-      // wants to move stock, and this is where that intent is dropped.
+    // A stock update is an ABSOLUTE SET, not a movement (DEC-029): the
+    // quantity on the document IS the new stock level. A shopkeeper
+    // counts the shelf, types 7, stock becomes 7 — regardless of what
+    // the system believed a moment earlier.
+    //
+    // Keyed on KIND, not Direction (DEC-030). A stock update sets stock
+    // because of what it is; Direction means only "which way does the
+    // quantity move" and applies to the delta-based kinds. Direction on
+    // a stock_update row is unread.
+    const isAbsoluteSet = txnType.Kind === "stock_update";
+
+    if (!isAbsoluteSet && txnType.Direction !== "in" && txnType.Direction !== "out") {
+      // An unrecognised direction. The CHECK from migration 038 makes
+      // this unreachable in practice; skipping is safer than guessing.
+      console.error(
+        `onInventoryCreateUpdateInStock: message ${messageId} has unknown Direction "${txnType.Direction}" — skipping InStock`
+      );
       await client.query("COMMIT");
       return res.status(200).send();
     }
@@ -184,10 +194,17 @@ module.exports.onInventoryCreateUpdateInStock = async (req, res) => {
 
     for (const [productId, { before, after }] of qtyByProduct) {
       const delta = after - before;
-      if (delta === 0) continue; // untouched by this create/edit — nothing to apply
+      // A set always applies, even when the figure is unchanged from the
+      // previous version of the document — "still 7" is a real statement
+      // about stock. A movement of zero genuinely has nothing to do.
+      if (!isAbsoluteSet && delta === 0) continue;
 
-      const signedDelta = txnType.Direction === "out" ? -delta : delta;
-console.log("first")
+      // For a set, the value written IS the counted quantity. For a
+      // movement it's the signed delta. Note `delta` is deliberately not
+      // used in the set case — "what changed since the last version of
+      // this document" is meaningless when the document states an
+      // absolute figure.
+      const applied = isAbsoluteSet ? after : txnType.Direction === "out" ? -delta : delta;
       await client.query(
         `INSERT INTO "InStock"
           ("InStockID", "StoreID", "ProductID", "OpeningQty", "InStockQty",
@@ -195,7 +212,10 @@ console.log("first")
            "Action", "ActionOn", "CreatedAt", "UpdatedAt")
          VALUES ($1, $2, $3, 0, $4, $5, $6, $7, $4, 'NEW', now(), now(), now())
          ON CONFLICT ("StoreID", "ProductID") DO UPDATE SET
-           "InStockQty" = "InStock"."InStockQty" + EXCLUDED."InStockQty",
+           -- Set replaces, movement accumulates. This is the whole
+           -- difference between 'adjustment' and 'in'/'out'.
+           "InStockQty" = CASE WHEN $8 THEN EXCLUDED."InStockQty"
+                               ELSE "InStock"."InStockQty" + EXCLUDED."InStockQty" END,
            "LastTransactionTypeID" = EXCLUDED."LastTransactionTypeID",
            "LastTransactionNo" = EXCLUDED."LastTransactionNo",
            "LastTransactionDate" = EXCLUDED."LastTransactionDate",
@@ -207,10 +227,11 @@ console.log("first")
           crypto.randomUUID(),
           purchase.StoreID,
           productId,
-          signedDelta,
+          applied,
           purchase.TransactionTypeID,
           purchase.TransactionNo,
           purchase.TransactionDate,
+          isAbsoluteSet,
         ]
       );
     }
